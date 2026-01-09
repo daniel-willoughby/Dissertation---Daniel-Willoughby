@@ -36,15 +36,11 @@ RED = 1                                     # Team 1 is the red team
 LOAD_CHECKPOINT = False                     # Load pre-saved weights and biases?
 vmas_device = torch.device("cpu")           # we do not use a GPU
 
-# Policy lag parameters
-policy_lag = False
-iterations_per_lag = 400
-
 # Configurable Hyperparameters - Baseline parameters v1
-frames_per_batch = 40080                    # extra 80 frames is so frames per batch is divisible for parallel runs
+frames_per_batch = 40080                    # 80 extra frames ensures frames per batch is divisible by env num
 total_iterations = 10000
 total_frames = frames_per_batch * total_iterations
-total_epochs = 4
+total_epochs = 6
 minibatch_size = 5000
 learning_rate_blue = 3e-4
 learning_rate_red = 3e-4
@@ -83,7 +79,6 @@ env = VmasEnv(
 )
 
 
-
 # Initialisation
 
 torch.manual_seed(0)                        # a seed allows repeatable results for comparative/analytic purposes
@@ -99,7 +94,6 @@ check_env_specs(env)                        # simple self-test to sanity check d
 # Create either a neural network for every blue agent if share_parameters_policy = True, or a single neural network for
 # all blue agents if share_parameters_policy is False.
 # We have chosen a depth of 2 and a num_cells of 128 as a compromise between runtime and performance.
-# Sequential allowed us to insert debug
 policy_net_blue = torch.nn.Sequential(
     MultiAgentMLP(
         n_agent_inputs=env.observation_spec["agent_blue", "observation"].shape[-1],
@@ -309,31 +303,8 @@ pbar = tqdm(total=total_iterations, desc="episode_reward_mean = 0")
 episode_reward_mean_list_blue = []
 episode_reward_mean_list_red = []
 
-
-# in policy lag mode only one team is learning at a given time
-if policy_lag:
-    blue_learning = True
-    red_learning = False
-else:
-    blue_learning = True
-    red_learning = True
-
-
-# this is used for policy lag where learning is turned on and off on certain iters.
-iteration_count = 0
-
-
 # rollout loop
 for tensordict_data in collector:
-
-    iteration_count += 1
-
-    if policy_lag and iteration_count % iterations_per_lag == 0:
-        blue_learning = not blue_learning
-        red_learning = not red_learning
-        print("learning swapped. blue learning:", blue_learning, "red learning:", red_learning)
-
-
 
     # Done and terminated states need their own code due to not conforming to the (S,A,R,S') paradigm.
     tensordict_data.set(
@@ -387,46 +358,46 @@ for tensordict_data in collector:
 
     # Optimisation loop
     for _ in range(total_epochs):
-        if blue_learning:
-            for _ in range(frames_per_batch // minibatch_size):
-                subdata = replay_buffer_blue.sample()
-                loss_vals = loss_module_blue(subdata)
-                loss_value = (
-                        loss_vals["loss_objective"]
-                        + value_loss_coef * loss_vals["loss_critic"]
-                        + loss_vals["loss_entropy"]
-                )
 
-                # Triggers backpropagation to compute gradients.
-                loss_value.backward()
+        for _ in range(frames_per_batch // minibatch_size):
+            subdata = replay_buffer_blue.sample()
+            loss_vals = loss_module_blue(subdata)
+            loss_value = (
+                    loss_vals["loss_objective"]
+                    + value_loss_coef * loss_vals["loss_critic"]
+                    + loss_vals["loss_entropy"]
+            )
 
-                torch.nn.utils.clip_grad_norm_(
-                    loss_module_blue.parameters(), max_grad_norm
-                )
+            # Triggers backpropagation to compute gradients.
+            loss_value.backward()
 
-                # Updates the parameters of policy (weights) based on the gradient values.
-                optim_blue.step()
+            torch.nn.utils.clip_grad_norm_(
+                loss_module_blue.parameters(), max_grad_norm
+            )
 
-                # Clears the calculated gradients for the next iteration.
-                optim_blue.zero_grad()
-        if red_learning:
-            for _ in range(frames_per_batch // minibatch_size):
-                subdata2 = replay_buffer_red.sample()
-                loss_vals = loss_module_red(subdata2)
-                loss_value = (
-                        loss_vals["loss_objective"]
-                        + value_loss_coef * loss_vals["loss_critic"]
-                        + loss_vals["loss_entropy"]
-                )
+            # Updates the parameters of policy (weights) based on the gradient values.
+            optim_blue.step()
 
-                loss_value.backward()
+            # Clears the calculated gradients for the next iteration.
+            optim_blue.zero_grad()
 
-                torch.nn.utils.clip_grad_norm_(
-                    loss_module_red.parameters(), max_grad_norm
-                )
+        for _ in range(frames_per_batch // minibatch_size):
+            subdata2 = replay_buffer_red.sample()
+            loss_vals = loss_module_red(subdata2)
+            loss_value = (
+                    loss_vals["loss_objective"]
+                    + value_loss_coef * loss_vals["loss_critic"]
+                    + loss_vals["loss_entropy"]
+            )
 
-                optim_red.step()
-                optim_red.zero_grad()
+            loss_value.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                loss_module_red.parameters(), max_grad_norm
+            )
+
+            optim_red.step()
+            optim_red.zero_grad()
 
     # Update the collector's copies of the policies
     collector.update_policy_weights_()
@@ -448,8 +419,8 @@ for tensordict_data in collector:
     pbar.update()
 
     # Save the new policies for runtime analysis.
-    torch.save(combined_policy[BLUE], "policy_blue_lag.pt")
-    torch.save(combined_policy[RED], "policy_red_lag.pt")
+    torch.save(combined_policy[BLUE], "policy_blue.pt")
+    torch.save(combined_policy[RED], "policy_red.pt")
 
 
 # Export the training data
@@ -465,11 +436,11 @@ with open("results.iter", "w", newline="") as f:
 plt.plot(episode_reward_mean_list_blue)
 plt.xlabel("Training iterations")
 plt.ylabel("Reward")
-plt.title("Episode reward mean blue - Policy Lag")
+plt.title("Episode reward mean blue")
 plt.show()
 
 plt.plot(episode_reward_mean_list_red)
 plt.xlabel("Training iterations")
 plt.ylabel("Reward")
-plt.title("Episode reward mean red - Policy Lag")
+plt.title("Episode reward mean red")
 plt.show()
